@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head> 
+    <title>SJCC Grades</title> 
+    <meta charset="UTF-8"> 
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; color: #333; }
+          /* Two modes: scrollable (default) and fit (columns forced to fit)
+           Scrollable lets the browser size columns by content (more readable)
+           Fit forces table-layout:fixed and wraps content to avoid horizontal scroll. */
+          #tableContainer { margin-top: 20px; border: 1px solid #ddd; padding-bottom: 28px; }
+          /* Reserve room at bottom so fixed scrollbar doesn't overlap content */
+          body { padding-bottom: 28px; }
+        #tableContainer.scrollable { overflow-x: auto; }
+        #tableContainer.fit { overflow-x: visible; }
+        /* Fixed bottom scrollbar that stays visible */
+        .bottom-scroll { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; overflow-x: auto; overflow-y: hidden; background: #f0f0f0; z-index: 9999; border-top: 1px solid #ddd; }
+        .bottom-scroll > div { height: 1px; }
+
+        table { border-collapse: collapse; width: 100%; }
+        /* By default allow auto layout so columns size to content */
+        table.auto { table-layout: auto; width: auto; }
+        table.fixed { table-layout: fixed; width: 100%; }
+
+        th, td { border: 1px solid #333; padding: 6px; text-align: left; word-wrap: break-word; overflow-wrap: break-word; font-size: 11px; }
+        th { background-color: rgb(31, 241, 126); color: #333; font-weight: bold; }
+        td { max-width: 250px; white-space: normal; background-color: #f5f5f5; }
+        img { max-width: 150px; max-height: 150px; }
+    </style>
+</head> 
+<body style="background-color:powderblue;">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.0/xlsx.full.min.js"></script>
+
+    <input type="file" id="excelFile" accept= ".xlsx, .xls, .csv" />
+    <button onclick="loadExcel()">Load Excel</button>
+    <!-- Scroll mode is permanent: no layout toggle -->
+    
+    <div id="searchContainer" style="display:none; margin: 20px 0;">
+        <input type="text" id="searchInput" placeholder="Search..." onkeyup="searchTable()" style="padding: 8px; width: 300px;">
+        <span id="searchResults"></span>
+    </div>
+    
+    <div id="tableContainer" class="scrollable"></div>
+    
+    <!-- Fixed bottom scrollbar for horizontal scrolling -->
+    <div class="bottom-scroll">
+        <div id="bottomScrollContent" style="width: 100%; height: 1px;"></div>
+    </div>
+
+    <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script>
+        // Verify library loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            if (typeof XLSX === 'undefined') {
+                console.warn('XLSX library not loaded. Retrying...');
+                // Retry loading if needed
+            } else {
+                console.log('XLSX library loaded successfully');
+            }
+        });
+    </script>
+    <script>
+        let allData = [];
+        let lastRawData = [];
+        let lastMerges = [];
+        
+        // Sync bottom scrollbar with table container
+        function syncBottomScroll() {
+            const tableContainer = document.getElementById('tableContainer');
+            const bottomScroll = document.querySelector('.bottom-scroll');
+            
+            tableContainer.addEventListener('scroll', function() {
+                bottomScroll.scrollLeft = tableContainer.scrollLeft;
+            });
+            
+            bottomScroll.addEventListener('scroll', function() {
+                tableContainer.scrollLeft = bottomScroll.scrollLeft;
+            });
+        }
+        
+        function loadExcel() {
+            // Check if XLSX library is loaded
+            if (typeof XLSX === 'undefined') {
+                alert('XLSX library failed to load. Please refresh the page and try again.');
+                return;
+            }
+            
+            const file = document.getElementById('excelFile').files[0];
+            if (!file) {
+                alert('Please select a file first');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    const SheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[SheetName];
+                    // Get both array-of-arrays (raw) and object JSON
+                    const raw = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+                    
+                    // For JSON, use the NAME row as header (usually around row 3-4)
+                    let headerRowIndex = raw.findIndex((r) => {
+                        if (!r) return false;
+                        const rowStr = r.map(cell => String(cell || '').toLowerCase()).join('|');
+                        return rowStr.includes('name');
+                    });
+                    
+                    // Parse JSON with the correct header row
+                    let json = [];
+                    if (headerRowIndex >= 0) {
+                        const headerRow = raw[headerRowIndex] || [];
+                        for (let i = headerRowIndex + 1; i < raw.length; i++) {
+                            const row = raw[i] || [];
+                            const allEmpty = row.every((cell) => cell === '' || cell === null || cell === undefined);
+                            if (!allEmpty) {
+                                const obj = {};
+                                headerRow.forEach((header, idx) => {
+                                    obj[header] = row[idx];
+                                });
+                                json.push(obj);
+                            }
+                        }
+                    } else {
+                        json = XLSX.utils.sheet_to_json(worksheet);
+                    }
+                    
+                    // get merges (to detect merged header cells)
+                    const merges = worksheet['!merges'] || [];
+
+                    console.log('Loaded raw rows:', raw);
+                    console.log('Loaded data objects:', json);
+
+                    if ((!raw || raw.length === 0) && (!json || json.length === 0)) {
+                        alert('No data found in the Excel file');
+                        return;
+                    }
+
+                    allData = json;
+                    // Prefer rendering the raw array so multi-row headers are preserved
+                    displayTableFromRaw(raw, merges);
+                    document.getElementById('searchContainer').style.display = 'block';
+                } catch (error) {
+                    console.error('Error loading Excel:', error);
+                    alert('Error loading Excel file: ' + error.message);
+                }
+            };
+            reader.onerror = function(error) {
+                console.error('File read error:', error);
+                alert('Error reading file: ' + error);
+            };
+            reader.readAsArrayBuffer(file);
+        }
+        
+        // Render table from raw array-of-arrays so multi-row headers are preserved
+        function displayTableFromRaw(raw, merges) {
+            if (!raw || raw.length === 0) {
+                document.getElementById('tableContainer').innerHTML = '<p>No data to display</p>';
+                return;
+            }
+            
+            // Save the raw data and merges for returning from search
+            lastRawData = raw;
+            lastMerges = merges;
+
+            merges = merges || [];
+            // Build map of merges keyed by start cell 'r:c' => {cols, rows}
+            const mergeMap = {};
+            merges.forEach(m => {
+                const sr = m.s.r, sc = m.s.c, er = m.e.r, ec = m.e.c;
+                mergeMap[`${sr}:${sc}`] = { cols: ec - sc + 1, rows: er - sr + 1 };
+            });
+
+            // Helper: check if (r,c) is inside any merge range but not the start cell
+            function isCoveredByMerge(r, c) {
+                for (let mi = 0; mi < merges.length; mi++) {
+                    const m = merges[mi];
+                    const sr = m.s.r, sc = m.s.c, er = m.e.r, ec = m.e.c;
+                    if (r >= sr && r <= er && c >= sc && c <= ec) {
+                        // if it's the start of the merge, not covered
+                        if (r === sr && c === sc) return false;
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // Detect where data rows start: find the row with "NO." and "NAME"
+            let headerIndex = raw.findIndex((r) => {
+                if (!r) return false;
+                const rowStr = r.map(cell => String(cell || '').toLowerCase()).join('|');
+                return rowStr.includes('no.') && rowStr.includes('name');
+            });
+            
+            // Look backwards from headerIndex to find DATE row, or use default
+            let dateRowIndex = -1;
+            if (headerIndex >= 0) {
+                for (let i = headerIndex - 1; i >= 0; i--) {
+                    const rowStr = (raw[i] || []).map(cell => String(cell || '').toLowerCase()).join('|');
+                    if (rowStr.includes('date:')) {
+                        dateRowIndex = i;
+                        break;
+                    }
+                }
+            }
+            
+            // Set header rows to include date row and up to 4 total header rows
+            let headerRows = headerIndex >= 0 ? Math.min(headerIndex + 1, 4) : Math.min(4, raw.length - 1);
+
+            // Build table keeping the top headerRows as <thead>
+            let table = '<table class="auto" border="1">';
+            table += '<thead>';
+            for (let r = 0; r < headerRows && r < raw.length; r++) {
+                const row = raw[r] || [];
+                
+                // For date row, keep all values as-is (don't remove the numbers)
+                const cleanedRow = row.map(cell => cell);
+                
+                table += '<tr>';
+                // Render each cell in this row as-is (only skip if covered by merge)
+                for (let c = 0; c < cleanedRow.length; c++) {
+                    // If a merge starts here, render it with colspan/rowspan
+                    const key = `${r}:${c}`;
+                    if (mergeMap[key]) {
+                        const m = mergeMap[key];
+                        const cell = cleanedRow[c] === undefined ? '' : String(cleanedRow[c]);
+                        table += `<th colspan="${m.cols}" rowspan="${m.rows}" style="white-space:normal; vertical-align:middle;">${cell}</th>`;
+                        c += m.cols - 1; // skip merged columns in this row
+                        continue;
+                    }
+                    // Skip cells that are covered by any merge (including merges that started on earlier rows)
+                    if (isCoveredByMerge(r, c)) continue;
+                    const cell = cleanedRow[c] === undefined ? '' : String(cleanedRow[c]);
+                    table += `<th style="white-space:normal; vertical-align:middle;">${cell}</th>`;
+                }
+                table += '</tr>';
+            }
+            table += '</thead>';
+
+            // Body: remaining rows
+            table += '<tbody>';
+            for (let r = headerRows; r < raw.length; r++) {
+                const row = raw[r] || [];
+                // Skip completely empty rows
+                const allEmpty = row.every((cell) => cell === '' || cell === null || cell === undefined);
+                if (allEmpty) continue;
+                table += '<tr>';
+                // Render each cell in this row as-is (only skip if covered by merge)
+                for (let c = 0; c < row.length; c++) {
+                    const key = `${r}:${c}`;
+                    if (mergeMap[key]) {
+                        const m = mergeMap[key];
+                        let cell = row[c] === undefined ? '' : row[c];
+                        if (typeof cell === 'string' && (cell.startsWith('http') || cell.endsWith('.jpg') || cell.endsWith('.png') || cell.endsWith('.gif'))) {
+                            cell = `<img src="${cell}" style="max-width:150px; max-height:150px;">`;
+                        }
+                        table += `<td colspan="${m.cols}" rowspan="${m.rows}">${cell}</td>`;
+                        c += m.cols - 1; // skip merged columns in this row
+                        continue;
+                    }
+                    // Skip cells that are covered by any merge (including merges that started earlier rows)
+                    if (isCoveredByMerge(r, c)) continue;
+
+                    let cell = row[c] === undefined ? '' : row[c];
+                    // If looks like image URL, make an img
+                    if (typeof cell === 'string' && (cell.startsWith('http') || cell.endsWith('.jpg') || cell.endsWith('.png') || cell.endsWith('.gif'))) {
+                        cell = `<img src="${cell}" style="max-width:150px; max-height:150px;">`;
+                    } else if (typeof cell === 'number') {
+                        // Round numeric values to 2 decimals
+                        cell = cell.toFixed(2);
+                    }
+                    table += `<td>${cell}</td>`;
+                }
+                table += '</tr>';
+            }
+            table += '</tbody>';
+            table += '</table>';
+
+            document.getElementById('tableContainer').innerHTML = table;
+            
+            // Update bottom scrollbar width to match table width
+            setTimeout(function() {
+                const table = document.querySelector('table');
+                const bottomScrollContent = document.getElementById('bottomScrollContent');
+                if (table && bottomScrollContent) {
+                    bottomScrollContent.style.width = table.scrollWidth + 'px';
+                }
+                syncBottomScroll();
+            }, 0);
+        }
+
+        // Original displayTable kept for search results (renders from object JSON)
+        function displayTable(data) {
+            if (!data || data.length === 0) {
+                document.getElementById('tableContainer').innerHTML = '<p>No data to display</p>';
+                return;
+            }
+            
+            // Get all keys from data
+            let allKeys = new Set();
+            data.forEach(row => {
+                Object.keys(row).forEach(key => allKeys.add(key));
+            });
+            
+            // Categorize columns
+            const allKeysArray = Array.from(allKeys);
+            const nameCol = [];
+            const subjectCol = [];
+            const scoreCol = [];
+            
+            allKeysArray.forEach(key => {
+                const lower = key.toLowerCase();
+                
+                // Skip _EMPTY columns
+                if (lower.includes('_empty')) {
+                    return;
+                }
+                
+                // NAME column first
+                if (lower.includes('name')) {
+                    nameCol.push(key);
+                }
+                // SUBJECT column second
+                else if (lower.includes('subject')) {
+                    subjectCol.push(key);
+                }
+                // All other columns (RAW SCORE, %, etc.)
+                else {
+                    scoreCol.push(key);
+                }
+            });
+            
+            // Pair RAW SCORE columns with their corresponding % columns
+            const rawScoreCols = scoreCol.filter(col => col.toLowerCase().includes('raw score')).sort();
+            const percentCols = scoreCol.filter(col => col.toLowerCase().includes('%')).sort();
+            
+            // Match % to RAW SCORE by extracting the item count (e.g., "100 ITEMS" from both)
+            const pairedScoreCols = [];
+            rawScoreCols.forEach(rawCol => {
+                pairedScoreCols.push(rawCol);
+                
+                // Find matching % column with same item count
+                const match = rawCol.match(/\(([^)]+)\)/);
+                if (match) {
+                    const itemCount = match[1];
+                    const matchingPercent = percentCols.find(pCol => pCol.includes(itemCount));
+                    if (matchingPercent) {
+                        pairedScoreCols.push(matchingPercent);
+                        // Remove from percentCols so it's not added again
+                        
+                    }
+                }
+            });
+            
+            // Add any remaining % columns that weren't paired
+            pairedScoreCols.push(...percentCols.sort());
+            
+            // Combine in proper order: NAME, SUBJECT, then paired score columns
+            const columns = [...nameCol, ...subjectCol, ...pairedScoreCols];
+
+            let table = '<table class="auto" border="1"><thead><tr>';
+            columns.forEach(key => {
+                table += `<th>${key}</th>`;
+            });
+            table += '</tr></thead><tbody>';
+            data.forEach(row => {
+                table += '<tr>';
+                columns.forEach(key => {
+                    let cellValue = row[key];
+                    // Skip rendering empty/null/undefined cells
+                    if (cellValue === '' || cellValue === null || cellValue === undefined) {
+                        table += `<td></td>`;
+                        return;
+                    }
+                    if (typeof cellValue === 'string' && (cellValue.includes('http') || cellValue.endsWith('.jpg') || cellValue.endsWith('.png') || cellValue.endsWith('.gif'))) {
+                        cellValue = `<img src="${cellValue}" style="max-width:150px; max-height:150px;">`;
+                    } else if (typeof cellValue === 'number') {
+                        // Round numeric values to 2 decimals (consistent with main table)
+                        cellValue = cellValue.toFixed(2);
+                    }
+                    table += `<td>${cellValue}</td>`;
+                });
+                table += '</tr>';
+            });
+            table += '</tbody></table>';
+
+            document.getElementById('tableContainer').innerHTML = table;
+        }
+        
+        function searchTable() {
+            const searchTerm = document.getElementById('searchInput').value.toLowerCase();
+            
+            if (searchTerm === '') {
+                // Return to full table display
+                displayTableFromRaw(lastRawData, lastMerges);
+                document.getElementById('searchResults').textContent = '';
+                return;
+            }
+            
+            const filteredData = allData.filter(row => {
+                return Object.values(row).some(value => 
+                    String(value).toLowerCase().includes(searchTerm)
+                );
+            });
+            
+            displayTable(filteredData);
+            document.getElementById('searchResults').textContent = `Found ${filteredData.length} results`;
+        }
+    </script>
+</body>
+</html>
